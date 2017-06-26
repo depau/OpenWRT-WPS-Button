@@ -1,0 +1,9 @@
+#!/bin/sh
+logger button $BUTTON was $ACTION
+
+# COMMENT THIS WHEN DONE:
+exit
+
+if [ $BUTTON == "wps" -a $ACTION == "pressed" ]; then
+	((/usr/bin/wps_pushbutton | logger)&)&
+fi

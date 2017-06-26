@@ -1,0 +1,136 @@
+#!/bin/sh
+. /lib/functions/leds.sh
+
+# LED configuration
+led_wps="d-link:blue:wps"
+led_success="d-link:green:status"
+led_failure="d-link:amber:status"
+
+led_wps_delay_on=100
+led_wps_delay_off=100
+
+# Temporary status file
+tmpfile="/tmp/wps_started"
+
+# Helper function definitions
+
+wps_led_blink() {
+	led_timer $led_wps $led_wps_delay_on $led_wps_delay_off
+}
+
+wps_led_off() {
+	led_off $led_wps
+}
+
+led_get_attr() {
+	[ -f "/sys/class/leds/$1/$2" ] && cat "/sys/class/leds/$1/$2"
+}
+
+led_blink_for_result() {
+	# Backup LED status
+	failure_brightness=`led_get_attr $led_failure brightness`
+	success_brightness=`led_get_attr $led_success brightness`
+	failure_trigger=`led_get_attr $led_failure trigger`
+	success_trigger=`led_get_attr $led_success trigger` 
+
+	# Turn off LEDs
+	led_off $led_failure
+	led_off $led_success
+
+	# Blink LEDs five times
+	led_timer $1 100 100
+	sleep 1
+	led_off $1
+
+	# Restore LED status
+	led_set_attr $led_failure brightness $failure_brightness
+	led_set_attr $led_success brightness $success_brightness
+	led_set_attr $led_failure trigger $failure_trigger
+	led_set_attr $led_success trigger $success_trigger
+}
+
+led_blink_success() {
+	led_blink_for_result $led_success 100 100	
+}
+
+led_blink_failure() {
+	led_blink_for_result $led_failure 100 100
+}
+
+
+wps_cancel_if_active() {
+	hostapd_cli wps_get_status | grep -q "PBC Status: Active"
+	if [ $? == 0 ]; then
+		hostapd_cli wps_cancel
+		return 0
+	fi
+	return 1
+}
+
+wps_was_started() {
+	r=`cat $tmpfile 2> /dev/null`
+	if [ y$r == yrunning ]; then
+		return 0
+	fi
+	return 1
+}
+
+wps_mark_started() {
+	echo "running" > $tmpfile
+}
+
+wps_mark_stopped() {
+	rm $tmpfile
+}
+
+
+##### Actual logic
+
+# Check if WPS is already active; in that case, cancel it
+#hostapd_cli wps_get_status
+wps_was_started
+if [ $? == 0 ]; then
+	echo "WPS is active, canceling"
+	hostapd_cli wps_cancel
+	wps_mark_stopped
+	wps_led_off
+	#led_blink_failure
+	exit
+fi
+
+echo "Activating WPS pushbutton"
+wps_mark_started
+hostapd_cli wps_pbc
+
+# Blink LED
+wps_led_blink
+
+# 3 minutes timeout
+for i in `seq 1 180`; do
+	hostapd_cli wps_get_status | grep -q "PBC Status: Active"
+	if [ $? != 0 ]; then
+		break
+	fi
+	sleep 1
+done
+
+# If WPS is still active, shut it down
+wps_cancel_if_active
+wps_mark_stopped
+
+# Turn OFF WPS LED, blink status LED for success/failure
+wps_led_off
+hostapd_cli wps_get_status | grep -q "Last WPS result: Success"
+ret1=$?
+# Timeout is not reported as failure, but we still want to blink the LED in failure
+hostapd_cli wps_get_status | grep -qv "PBC Status: Timed-out" && ret2=1 || ret2=0
+
+# If everything went right, both ret1 and ret2 should be 0
+if [ `expr $ret1 + $ret2` == 0 ]; then
+	led_blink_success
+	echo "WPS pushbutton was successful"
+else
+	led_blink_failure
+	echo "WPS pushbutton failed"
+fi
+hostapd_cli wps_get_status
